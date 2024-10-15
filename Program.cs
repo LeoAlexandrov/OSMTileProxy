@@ -1,18 +1,16 @@
 using System;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
-using AleProjects.TileProxy;
+using OSMTileProxy.Services;
 
 
-
-void ConfigureServices(IServiceCollection services, ConfigurationManager configuration)
+void ConfigureServices(IServiceCollection services, ConfigurationManager config)
 {
 	services
 		.AddSingleton<TileManager>()
@@ -23,7 +21,6 @@ void ConfigureServices(IServiceCollection services, ConfigurationManager configu
 
 void ConfigureApp(WebApplication app)
 {
-
 	if (app.Environment.IsDevelopment())
 	{
 		app.UseDeveloperExceptionPage();
@@ -40,13 +37,9 @@ void ConfigureApp(WebApplication app)
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
 ConfigureServices(builder.Services, builder.Configuration);
 
 var app = builder.Build();
 
-// Configure application.
 ConfigureApp(app);
-
 app.Run();
-

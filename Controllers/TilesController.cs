@@ -4,14 +4,13 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading.Tasks;
-
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 
-using AleProjects.TileProxy;
+using OSMTileProxy.Services;
 
 
-namespace SpeedtrapAlertWeb.Api
+namespace OSMTileProxy.Controllers
 {
 
 	[Route("[controller]")]
@@ -26,7 +25,7 @@ namespace SpeedtrapAlertWeb.Api
 		[ResponseCache(Duration = 3600)]
 		public async Task<IActionResult> Get(string provider, int level, int x, int y)
 		{
-			var result = await _tileManager.Get(provider, level, x, y, _httpClientFactory);
+			var result = await _tileManager.GetAsync(provider, level, x, y, _httpClientFactory);
 
 			if (result.BadRequestInfo != null)
 				return BadRequest(result.BadRequestInfo);

@@ -12,28 +12,28 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
 
-namespace AleProjects.TileProxy
+namespace OSMTileProxy.Services
 {
+
 	public class TileManager
 	{
-		private const string DEFAULT_USER_AGENT = "Your-user-agent";
-
-		private TimeSpan _expiration = new(7, 0, 0, 0);
-		private string _cacheFolder;
-		private Dictionary<string, Provider> _providers;
-		private ConcurrentDictionary<string, int> _tilesToLoad = new();
+		private readonly TimeSpan _expiration = new(7, 0, 0, 0); // seven days - recommended expiration time for cached tiles
+		private readonly string _cacheFolder;
+		private readonly Dictionary<string, Provider> _providers;
+		private readonly ConcurrentDictionary<string, int> _tilesToLoad = new();
 
 		private event EventHandler<TileReadyEventArgs> TileReady = null;
 
 
 		class Provider
 		{
-			private string _fileType = null;
+			private string _contentType;
+			private string _fileType;
 
 			public string Id { get; set; }
 			public string Url { get; set; }
 			public string UserAgent { get; set; }
-			public string ContentType { get; set; }
+			public string ContentType { get => UseWebp ? "image/webp" : _contentType ; set => _contentType = value; }
 			public bool UseWebp { get; set; }
 			public int MinZoom { get; set; }
 			public int MaxZoom { get; set; }
@@ -42,15 +42,18 @@ namespace AleProjects.TileProxy
 
 			public string FileType
 			{
-				get 
+				get
 				{
 					if (string.IsNullOrEmpty(_fileType))
-						_fileType = ContentType switch
-						{
-							"image/png" => "png",
-							"image/webp" => "webp",
-							_ => "jpg"
-						};
+						if (UseWebp)
+							_fileType = "webp";
+						else
+							_fileType = ContentType switch
+							{
+								"image/png" => "png",
+								"image/webp" => "webp",
+								_ => "jpg"
+							};
 
 					return _fileType;
 				}
@@ -64,7 +67,7 @@ namespace AleProjects.TileProxy
 				{
 					Id = s.GetValue<string>("Id");
 					Url = s.GetValue<string>("Url");
-					UserAgent = s.GetValue("UserAgent", DEFAULT_USER_AGENT);
+					UserAgent = s.GetValue("UserAgent", string.Empty);
 					ContentType = s.GetValue("ContentType", "image/png");
 					UseWebp = s.GetValue("UseWebp", false);
 					MinZoom = s.GetValue("MinZoom", 1);
@@ -72,6 +75,7 @@ namespace AleProjects.TileProxy
 				}
 			}
 		}
+
 
 
 		struct TileReadyEventArgs
@@ -82,14 +86,15 @@ namespace AleProjects.TileProxy
 		}
 
 
-		public struct TileResult
+		public struct Result
 		{
 			public IReadOnlyDictionary<string, string[]> BadRequestInfo { get; set; }
 			public Exception ServerError { get; set; }
 			public string PhysicalFile { get; set; }
-			public string ContentType { get; set; }
 			public byte[] Content { get; set; }
+			public string ContentType { get; set; }
 		}
+
 
 		public struct Statistics
 		{
@@ -98,6 +103,7 @@ namespace AleProjects.TileProxy
 			public double HitsRate { get => Math.Round(100.0 * TotalHits / TotalRequests, 2); }
 			public object[] Providers { get; set; }
 		}
+
 
 
 		public TileManager(IConfiguration configuration)
@@ -111,56 +117,55 @@ namespace AleProjects.TileProxy
 				.ToDictionary(p => p.Id, p => p) ?? [];
 		}
 
-		public async Task<TileResult> Get(string providerId, int level, int x, int y, IHttpClientFactory httpClientFactory)
+		public async Task<Result> GetAsync(string providerId, int level, int x, int y, IHttpClientFactory httpClientFactory)
 		{
-			Provider provider;
-			Dictionary<string, string[]> badRequestData = null;
+			Dictionary<string, string[]> badRequestInfo = null;
 
-			if (!_providers.TryGetValue(providerId, out provider))
-				badRequestData = new() { ["provider"] = ["tile provider not found"] };
+			if (!_providers.TryGetValue(providerId, out Provider provider))
+				badRequestInfo = new() { [nameof(providerId)] = ["tile provider not found"] };
 			else if (level < provider.MinZoom || level > provider.MaxZoom)
-				badRequestData = new() { ["level"] = [string.Format("level parameter must be in range [{0}, {1}]", provider.MinZoom, provider.MaxZoom)] };
+				badRequestInfo = new() { [nameof(level)] = [string.Format("this parameter must be in range [{0}, {1}]", provider.MinZoom, provider.MaxZoom)] };
 			else
 			{
 				int max = (1 << level) - 1;
 
 				if (x < 0 || x > max)
-					badRequestData = new() { ["x"] = [string.Format("x parameter must be in range [0, {0}]", max)] };
+					badRequestInfo = new() { [nameof(x)] = [string.Format("this parameter must be in range [0, {0}]", max)] };
 
 				if (y < 0 || y > max)
-					(badRequestData ?? (badRequestData = new()))["y"] = [string.Format("y parameter must be in range [0, {0}]", max)];
+					(badRequestInfo ?? (badRequestInfo = new()))[nameof(y)] = [string.Format("this parameter must be in range [0, {0}]", max)];
 			}
 
-			if (badRequestData != null)
-				return new() { BadRequestInfo = badRequestData };
+			if (badRequestInfo != null)
+				return new() { BadRequestInfo = badRequestInfo };
 
 
 			string relPath = Path.Combine(providerId, level.ToString(), x.ToString(), string.Format("{0}.{1}", y, provider.FileType));
-			string fullPath = Path.Combine(_cacheFolder,  relPath);
-			FileInfo fi;
+			string fullPath = Path.Combine(_cacheFolder, relPath);
+			bool existsAndNotExpired;
 
 			provider.Requests++;
 
 			try
 			{
-				fi = new(fullPath);
+				existsAndNotExpired = File.GetLastWriteTime(fullPath).Add(_expiration) >= DateTime.Now;
 			}
 			catch
 			{
-				fi = null;
+				existsAndNotExpired = false;
 			}
 
-			if (fi != null && fi.Exists)
+			Result result = new() { ContentType = provider.ContentType };
+
+
+			if (existsAndNotExpired)
 			{
-				if (fi.LastWriteTime.Add(_expiration) >= DateTime.Now)
-				{
-					provider.Hits++;
+				provider.Hits++;
+				result.PhysicalFile = fullPath;
 
-					return new() { PhysicalFile = fullPath, ContentType = provider.ContentType };
-				}
+				return result;
 			}
 
-			TileResult result = new();
 
 			if (_tilesToLoad.TryAdd(relPath, 1))
 			{
@@ -187,10 +192,9 @@ namespace AleProjects.TileProxy
 					{
 						using MemoryStream ms = new();
 
-						await Image
-							.LoadAsync<Rgba32>(response.Content.ReadAsStream())
-							.ContinueWith(t => t.Result.SaveAsWebp(ms));
-
+						var img = await Image.LoadAsync<Rgba32>(response.Content.ReadAsStream());
+						
+						img.SaveAsWebp(ms);
 						content = ms.ToArray();
 					}
 					else
@@ -200,10 +204,10 @@ namespace AleProjects.TileProxy
 
 					Task.Run(() => SaveTile(fullPath, content));
 				}
-				catch (Exception ex) 
+				catch (Exception ex)
 				{
 					result.ServerError = ex;
-					content = [];
+					content = null;
 				}
 				finally
 				{
@@ -211,7 +215,6 @@ namespace AleProjects.TileProxy
 				}
 
 				result.Content = content;
-				result.ContentType = provider.ContentType;
 
 				RaiseTileReadyEvent(new TileReadyEventArgs() { Key = relPath, Content = content, ServerError = result.ServerError });
 			}
@@ -229,7 +232,7 @@ namespace AleProjects.TileProxy
 					}
 				}
 
-				this.TileReady += onTileReady;
+				TileReady += onTileReady;
 
 				try
 				{
@@ -240,7 +243,7 @@ namespace AleProjects.TileProxy
 				}
 				finally
 				{
-					this.TileReady -= onTileReady;
+					TileReady -= onTileReady;
 				}
 
 				provider.Hits++;
@@ -299,7 +302,7 @@ namespace AleProjects.TileProxy
 			{
 				Delegate[] handlers = handler.GetInvocationList();
 
-				foreach (var h in handlers.Cast<EventHandler<TileReadyEventArgs>>()) 
+				foreach (var h in handlers.Cast<EventHandler<TileReadyEventArgs>>())
 					h(this, e);
 			}
 		}
